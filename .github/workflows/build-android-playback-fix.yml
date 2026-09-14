@@ -56,17 +56,18 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           audio_path = Path("lib/services/audio_player/audio_player.dart")
           audio = audio_path.read_text()
-          old_host = '''  static String get _host =>
-              kIsWindows ? "localhost" : InternetAddress.anyIPv4.address;
-          '''
-          new_host = '''  static String get _host => InternetAddress.loopbackIPv4.address;
-          '''
-          if old_host not in audio:
-              raise RuntimeError("Expected SpotubeMedia host block not found")
-          audio = audio.replace(old_host, new_host, 1)
+          audio, count = re.subn(
+              r'  static String get _host =>\s+kIsWindows \? "localhost" : InternetAddress\.anyIPv4\.address;',
+              '  static String get _host => InternetAddress.loopbackIPv4.address;',
+              audio,
+              count=1,
+          )
+          if count != 1:
+              raise RuntimeError(f"Expected SpotubeMedia host block once, found {count}")
           audio_path.write_text(audio)
 
           playback_path = Path("lib/provider/server/routes/playback.dart")
