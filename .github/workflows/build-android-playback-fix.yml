@@ -1,0 +1,80 @@
+name: Build Spotube Fix Android
+
+on:
+  push:
+    branches:
+      - fix/android-playback-5.1.2
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout playback-fix branch
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter 3.35.2
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.35.2
+          cache: true
+
+      - name: Resolve Dart dependencies
+        run: flutter pub get
+
+      - name: Install Android build dependencies
+        run: dart cli/cli.dart install-dependencies --platform android --arch all
+
+      - name: Apply playback fixes and separate app flavor
+        run: python3 .github/scripts/apply_android_playback_fix.py
+
+      - name: Verify patched source
+        run: |
+          grep -q "inMicroseconds" lib/services/metadata/metadata.dart
+          grep -q "Cached audio source.*is stale" lib/services/sourced_track/sourced_track.dart
+          grep -q 'applicationIdSuffix ".fixed"' android/app/build.gradle
+          grep -q 'Spotube Fix' android/app/build.gradle
+
+      - name: Build universal Android debug APK
+        run: flutter build apk --debug --flavor fixed
+
+      - name: Prepare APK
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-fixed-debug.apk dist/spotube-fixed-5.1.2-debug.apk
+          sha256sum dist/spotube-fixed-5.1.2-debug.apk | tee dist/spotube-fixed-5.1.2-debug.apk.sha256
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotube-fixed-5.1.2-debug
+          path: |
+            dist/spotube-fixed-5.1.2-debug.apk
+            dist/spotube-fixed-5.1.2-debug.apk.sha256
+          if-no-files-found: error
+
+      - name: Publish test release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: android-playback-fix-5.1.2-test-v1
+          commit: ${{ github.sha }}
+          name: Spotube Fix 5.1.2 Android Test v1
+          body: |
+            Experimental Android build of Spotube 5.1.2+45 with playback fixes for stale audio-source cache, empty source matches, missing quality presets/container streams, and YouTube duration mapping. Built as a separate app flavor (oss.krtirtho.spotube.fixed / Spotube Fix) so it can coexist with the official Spotube installation.
+          prerelease: true
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "dist/spotube-fixed-5.1.2-debug.apk,dist/spotube-fixed-5.1.2-debug.apk.sha256"
+          token: ${{ secrets.GITHUB_TOKEN }}
