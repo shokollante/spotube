@@ -34,6 +34,18 @@ jobs:
       - name: Resolve Dart dependencies
         run: flutter pub get
 
+      - name: Generate build environment
+        run: |
+          cat > .env <<'EOF'
+          LASTFM_API_KEY=unused-in-test-build
+          LASTFM_API_SECRET=unused-in-test-build
+          HIDE_DONATIONS=1
+          ENABLE_UPDATE_CHECK=0
+          RELEASE_CHANNEL=nightly
+          EOF
+          dart run build_runner build --delete-conflicting-outputs
+          test -f lib/collections/env.g.dart
+
       - name: Install Android build dependencies
         run: dart cli/cli.dart install-dependencies --platform android --arch all
 
@@ -46,6 +58,7 @@ jobs:
           grep -q "Cached audio source.*is stale" lib/services/sourced_track/sourced_track.dart
           grep -q 'applicationIdSuffix ".fixed"' android/app/build.gradle
           grep -q 'Spotube Fix' android/app/build.gradle
+          test -f lib/collections/env.g.dart
 
       - name: Build universal Android debug APK
         run: flutter build apk --debug --flavor fixed
