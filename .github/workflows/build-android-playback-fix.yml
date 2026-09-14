@@ -52,12 +52,124 @@ jobs:
       - name: Apply playback fixes and separate app flavor
         run: python3 .github/scripts/apply_android_playback_fix.py
 
+      - name: Apply Android playback server v2 fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          audio_path = Path("lib/services/audio_player/audio_player.dart")
+          audio = audio_path.read_text()
+          old_host = '''  static String get _host =>
+              kIsWindows ? "localhost" : InternetAddress.anyIPv4.address;
+          '''
+          new_host = '''  static String get _host => InternetAddress.loopbackIPv4.address;
+          '''
+          if old_host not in audio:
+              raise RuntimeError("Expected SpotubeMedia host block not found")
+          audio = audio.replace(old_host, new_host, 1)
+          audio_path.write_text(audio)
+
+          playback_path = Path("lib/provider/server/routes/playback.dart")
+          playback = playback_path.read_text()
+
+          playback = playback.replace(
+              '${track.info.id}).${track.qualityPreset!.getFileExtension()}',
+              '${track.info.id}).${track.qualityPreset?.getFileExtension() ?? "audio"}',
+          )
+          playback = playback.replace(
+              '"content-type": ["audio/${track.qualityPreset!.name}"],',
+              '"content-type": ["audio/${track.qualityPreset?.name ?? (track.sources.isNotEmpty ? track.sources.first.container : "mpeg")}"],',
+          )
+
+          host_line = '        "host": Uri.parse(url).host,\n'
+          if host_line not in playback:
+              raise RuntimeError("Expected explicit upstream Host header not found")
+          playback = playback.replace(host_line, "")
+
+          old_head_block = '''    final contentLengthRes = await Future<dio_lib.Response?>.value(
+              dio.head(
+                url,
+                options: options.copyWith(responseType: ResponseType.bytes),
+              ),
+            ).catchError((e, stack) async {
+              AppLogger.reportError(e, stack);
+
+              final sourcedTrack = await ref
+                  .read(sourcedTrackProvider(track.query).notifier)
+                  .refreshStreamingUrl();
+
+              url = sourcedTrack.url!;
+
+              return dio.head(url, options: options);
+            });
+          '''
+          new_head_block = '''    dio_lib.Response? contentLengthRes;
+            try {
+              contentLengthRes = await dio.head(
+                url,
+                options: options.copyWith(responseType: ResponseType.bytes),
+              );
+            } catch (e, stack) {
+              AppLogger.reportError(e, stack);
+              try {
+                final sourcedTrack = await ref
+                    .read(sourcedTrackProvider(track.query).notifier)
+                    .refreshStreamingUrl();
+                url = sourcedTrack.url!;
+                contentLengthRes = await dio.head(
+                  url,
+                  options: options.copyWith(responseType: ResponseType.bytes),
+                );
+              } catch (e2, stack2) {
+                AppLogger.reportError(e2, stack2);
+                contentLengthRes = null;
+              }
+            }
+          '''
+          if old_head_block not in playback:
+              raise RuntimeError("Expected content-length HEAD block not found")
+          playback = playback.replace(old_head_block, new_head_block, 1)
+
+          old_get = '    final res = await dio.get<ResponseBody>(url, options: options);\n'
+          new_get = '''    dio_lib.Response<ResponseBody> res;
+            try {
+              res = await dio.get<ResponseBody>(url, options: options);
+            } on DioException catch (e, stack) {
+              final status = e.response?.statusCode;
+              if (status == 400 || status == 403 || status == 410) {
+                AppLogger.reportError(e, stack);
+                final sourcedTrack = await ref
+                    .read(sourcedTrackProvider(track.query).notifier)
+                    .refreshStreamingUrl();
+                url = sourcedTrack.url!;
+                res = await dio.get<ResponseBody>(url, options: options);
+              } else {
+                rethrow;
+              }
+            }
+          '''
+          if old_get not in playback:
+              raise RuntimeError("Expected upstream GET block not found")
+          playback = playback.replace(old_get, new_get, 1)
+          playback_path.write_text(playback)
+
+          print("Applied v2 fixes:")
+          print("- use 127.0.0.1 instead of 0.0.0.0 for local playback server")
+          print("- avoid null quality preset crashes in cache path")
+          print("- remove stale explicit upstream Host header")
+          print("- allow GET even when upstream HEAD is rejected")
+          print("- refresh signed stream URL and retry on HTTP 400/403/410")
+          PY
+
       - name: Verify patched source
         run: |
           grep -q "inMicroseconds" lib/services/metadata/metadata.dart
           grep -q "Cached audio source.*is stale" lib/services/sourced_track/sourced_track.dart
           grep -q 'applicationIdSuffix ".fixed"' android/app/build.gradle
           grep -q 'Spotube Fix' android/app/build.gradle
+          grep -q 'loopbackIPv4.address' lib/services/audio_player/audio_player.dart
+          ! grep -q 'InternetAddress.anyIPv4.address' lib/services/audio_player/audio_player.dart
+          ! grep -q '"host": Uri.parse(url).host' lib/provider/server/routes/playback.dart
           test -f lib/collections/env.g.dart
 
       - name: Build universal Android debug APK
@@ -66,28 +178,28 @@ jobs:
       - name: Prepare APK
         run: |
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-fixed-debug.apk dist/spotube-fixed-5.1.2-debug.apk
-          sha256sum dist/spotube-fixed-5.1.2-debug.apk | tee dist/spotube-fixed-5.1.2-debug.apk.sha256
+          cp build/app/outputs/flutter-apk/app-fixed-debug.apk dist/spotube-fixed-5.1.2-v2-debug.apk
+          sha256sum dist/spotube-fixed-5.1.2-v2-debug.apk | tee dist/spotube-fixed-5.1.2-v2-debug.apk.sha256
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spotube-fixed-5.1.2-debug
+          name: spotube-fixed-5.1.2-v2-debug
           path: |
-            dist/spotube-fixed-5.1.2-debug.apk
-            dist/spotube-fixed-5.1.2-debug.apk.sha256
+            dist/spotube-fixed-5.1.2-v2-debug.apk
+            dist/spotube-fixed-5.1.2-v2-debug.apk.sha256
           if-no-files-found: error
 
       - name: Publish test release
         uses: ncipollo/release-action@v1
         with:
-          tag: android-playback-fix-5.1.2-test-v1
+          tag: android-playback-fix-5.1.2-test-v2
           commit: ${{ github.sha }}
-          name: Spotube Fix 5.1.2 Android Test v1
+          name: Spotube Fix 5.1.2 Android Test v2
           body: |
-            Experimental Android build of Spotube 5.1.2+45 with playback fixes for stale audio-source cache, empty source matches, missing quality presets/container streams, and YouTube duration mapping. Built as a separate app flavor (oss.krtirtho.spotube.fixed / Spotube Fix) so it can coexist with the official Spotube installation.
+            Experimental Android build of Spotube 5.1.2+45. In addition to the v1 source/cache/duration fixes, v2 changes the internal Android playback URL from 0.0.0.0 to 127.0.0.1, avoids quality-preset null crashes, removes a stale explicit Host header, permits playback when upstream HEAD requests are rejected, and refreshes/retries signed stream URLs on HTTP 400/403/410.
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "dist/spotube-fixed-5.1.2-debug.apk,dist/spotube-fixed-5.1.2-debug.apk.sha256"
+          artifacts: "dist/spotube-fixed-5.1.2-v2-debug.apk,dist/spotube-fixed-5.1.2-v2-debug.apk.sha256"
           token: ${{ secrets.GITHUB_TOKEN }}
