@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -82,84 +82,15 @@ jobs:
               '"content-type": ["audio/${track.qualityPreset?.name ?? (track.sources.isNotEmpty ? track.sources.first.container : "mpeg")}"],',
           )
 
-          host_line = '        "host": Uri.parse(url).host,\n'
-          if host_line not in playback:
-              raise RuntimeError("Expected explicit upstream Host header not found")
-          playback = playback.replace(host_line, "")
-
-          old_head_block = '''    final contentLengthRes = await Future<dio_lib.Response?>.value(
-              dio.head(
-                url,
-                options: options.copyWith(responseType: ResponseType.bytes),
-              ),
-            ).catchError((e, stack) async {
-              AppLogger.reportError(e, stack);
-
-              final sourcedTrack = await ref
-                  .read(sourcedTrackProvider(track.query).notifier)
-                  .refreshStreamingUrl();
-
-              url = sourcedTrack.url!;
-
-              return dio.head(url, options: options);
-            });
-          '''
-          new_head_block = '''    dio_lib.Response? contentLengthRes;
-            try {
-              contentLengthRes = await dio.head(
-                url,
-                options: options.copyWith(responseType: ResponseType.bytes),
-              );
-            } catch (e, stack) {
-              AppLogger.reportError(e, stack);
-              try {
-                final sourcedTrack = await ref
-                    .read(sourcedTrackProvider(track.query).notifier)
-                    .refreshStreamingUrl();
-                url = sourcedTrack.url!;
-                contentLengthRes = await dio.head(
-                  url,
-                  options: options.copyWith(responseType: ResponseType.bytes),
-                );
-              } catch (e2, stack2) {
-                AppLogger.reportError(e2, stack2);
-                contentLengthRes = null;
-              }
-            }
-          '''
-          if old_head_block not in playback:
-              raise RuntimeError("Expected content-length HEAD block not found")
-          playback = playback.replace(old_head_block, new_head_block, 1)
-
-          old_get = '    final res = await dio.get<ResponseBody>(url, options: options);\n'
-          new_get = '''    dio_lib.Response<ResponseBody> res;
-            try {
-              res = await dio.get<ResponseBody>(url, options: options);
-            } on DioException catch (e, stack) {
-              final status = e.response?.statusCode;
-              if (status == 400 || status == 403 || status == 410) {
-                AppLogger.reportError(e, stack);
-                final sourcedTrack = await ref
-                    .read(sourcedTrackProvider(track.query).notifier)
-                    .refreshStreamingUrl();
-                url = sourcedTrack.url!;
-                res = await dio.get<ResponseBody>(url, options: options);
-              } else {
-                rethrow;
-              }
-            }
-          '''
-          if old_get not in playback:
-              raise RuntimeError("Expected upstream GET block not found")
-          playback = playback.replace(old_get, new_get, 1)
+          # Let Dio derive Host from the actual upstream URL. Signed YouTube URLs
+          # may change after refresh, so a manually supplied Host can become stale.
+          playback = playback.replace('        "host": Uri.parse(url).host,\n', '')
           playback_path.write_text(playback)
 
           print("Applied v2 fixes:")
           print("- use 127.0.0.1 instead of 0.0.0.0 for local playback server")
           print("- avoid null quality preset crashes in cache path")
-          print("- remove stale explicit upstream Host header")
-          print("- allow GET even when upstream HEAD is rejected")
-          print("- refresh signed stream URL and retry on HTTP 400/403/410")
+          print("- remove explicit upstream Host header")
           PY
 
       - name: Verify patched source
@@ -198,7 +129,7 @@ jobs:
           commit: ${{ github.sha }}
           name: Spotube Fix 5.1.2 Android Test v2
           body: |
-            Experimental Android build of Spotube 5.1.2+45. In addition to the v1 source/cache/duration fixes, v2 changes the internal Android playback URL from 0.0.0.0 to 127.0.0.1, avoids quality-preset null crashes, removes a stale explicit Host header, permits playback when upstream HEAD requests are rejected, and refreshes/retries signed stream URLs on HTTP 400/403/410.
+            Experimental Android build of Spotube 5.1.2+45. In addition to the v1 source/cache/duration fixes, v2 changes the internal Android playback URL from 0.0.0.0 to 127.0.0.1, avoids quality-preset null crashes, and lets Dio derive the upstream Host header from the active stream URL.
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
